@@ -1144,6 +1144,7 @@ class AgentManager(manager.Manager):
 
     @utils.pass_lock('d7f6685d-a90b-4a69-b178-4b8119a5bdde')
     def update_osd_state(self, context):
+        self.update_osd_presence(context)
         self.update_osds_weight(context)
         self.update_device_capacity(context)
         self.update_osds_status(context)
@@ -1154,6 +1155,33 @@ class AgentManager(manager.Manager):
         self.update_pool_stats(context)
         self.update_pool_usage(context)
         self.update_pool_status(context)
+
+    def update_osd_presence(self, context):
+        osd_json = self.ceph_driver.get_osds_status()
+        if osd_json is None:
+            return None
+        osd_dict = json.loads(osd_json)
+        ceph_osds = osd_dict['osds']
+        # Get OSD list from DB so we can track differences between OSD's returned by Ceph and DB
+        db_osds = db.osd_get_all(context)
+        ceph_names = ['osd.' + str(osd['osd']) for osd in ceph_osds]
+        db_names = [osd.osd_name for osd in db_osds]
+        missing_osds = [name for name in db_names if name not in ceph_names]
+        new_osds = [name for name in ceph_names if name not in db_names]
+        for osd in new_osds:
+            # OSD present in Ceph but not present in DB - needs to be added
+            LOG.info("Found new cluster OSD: %s" % osd_name)
+            device_info = {}
+            self.add_disk_to_db(context, device_info)
+            device_values = {}
+            self._conductor_rpcapi.device_create(context, device_values)
+        for osd in missing_osds:
+            # OSD not present in Ceph but present in DB - needs to be removed
+            LOG.info("OSD removed from cluster: %s" % osd.osd_name)
+            osd_id = osd.id
+            device_id = osd.device_id
+            db.osd_delete(context, osd_id)
+            db.device_delete(context, device_id)
 
     #@require_active_host
     @periodic_task(service_topic=FLAGS.agent_topic,
