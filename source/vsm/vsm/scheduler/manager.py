@@ -27,7 +27,6 @@ import random
 import time
 from oslo.config import cfg
 import datetime
-import time
 from vsm import db
 from vsm import exception
 from vsm import flags
@@ -1155,12 +1154,19 @@ class SchedulerManager(manager.Manager):
         ceph_conf_parser = cephconfigparser.CephConfigParser(str(ceph_conf_path))._parser
         ceph_conf_str = ceph_conf_parser.as_str()
         db.cluster_update_ceph_conf(context, cluster_id, ceph_conf_str)
+        # Update ceph.conf on cluster nodes
         server_list = db.init_node_get_all(context)
         LOG.info('import ceph conf from db to ceph nodes ')
         for ser in server_list:
             LOG.info('import ceph conf from db to ceph nodes %s '%ser['host'])
             self._agent_rpcapi.update_ceph_conf(context, ser['host'])
         LOG.info('import ceph conf from db to ceph nodes success ')
+        # Update osd_pool_default_size setting to match the ceph config value
+        default_size_setting = db.vsm_settings_get_by_name(context, 'osd_pool_default_size')
+        default_size_ceph_val = ceph_conf_parser.get('global', 'osd_pool_default_size')
+        if default_size_ceph_val and int(default_size_ceph_val) != int(default_size_setting.value):
+            vals = {'id' : default_size_setting.id, 'name' : default_size_setting.name, 'value': default_size_ceph_val}
+            db.vsm_settings_update_or_create(context, vals)
         return {"message":"success"}
 
     def integrate_cluster(self, context, server_list):
@@ -1452,11 +1458,19 @@ class SchedulerManager(manager.Manager):
                 return message
             else:
                 message = self._agent_rpcapi.import_cluster(context, body, monitor_pitched_host)
+            # Update ceph.conf on cluster nodes
             server_list = db.init_node_get_all(context)
             for ser in server_list:
                 LOG.info('fresh ceph conf from db to ceph nodes %s '%ser['host'])
                 self._agent_rpcapi.update_ceph_conf(context, ser['host'])
                 self._agent_rpcapi.update_keyring_admin_from_db(context,ser['host'])
+            # Update osd_pool_default_size setting to match the ceph config value
+            default_size_setting = db.vsm_settings_get_by_name(context, 'osd_pool_default_size')
+            ceph_conf_parser = cephconfigparser.CephConfigParser(FLAGS.ceph_conf)._parser
+            default_size_ceph_val = ceph_conf_parser.get('global', 'osd_pool_default_size')
+            if default_size_ceph_val and int(default_size_ceph_val) != int(default_size_setting.value):
+                vals = {'id' : default_size_setting.id, 'name' : default_size_setting.name, 'value': default_size_ceph_val}
+                db.vsm_settings_update_or_create(context, vals)
             LOG.info('fresh cluster status. monitor name is %s'%monitor_pitched_host)
             self._agent_rpcapi.cluster_refresh(context,monitor_pitched_host)
         except rpc_exc.Timeout:
